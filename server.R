@@ -1,6 +1,8 @@
 library(shiny)
-library(datasets)
 
+library(datasets)
+options(shiny.maxRequestSize=60*1024^2) 
+options ( java.parameters = "-Xmx1024m" )
 distVariables <- function(input1,input2) {
   if (input == input2) {
     "Choose another variable to analyze time series"
@@ -21,9 +23,7 @@ is.timeBased <- function (x)
 }
 
 shinyServer(
-  function(input, output, session) {
-    library(XLConnect) 
-    
+  function(input, output, session) {    
     library("zoo", lib.loc="~/R/win-library/3.1")
     library("xts", lib.loc="~/R/win-library/3.1")
     library("TTR", lib.loc="~/R/win-library/3.1")
@@ -31,6 +31,7 @@ shinyServer(
     library("forecast", lib.loc="~/R/win-library/3.1")
     library("tseries", lib.loc="~/R/win-library/3.1")
     library(XLConnect) 
+    #     library(gdata)
     library(dygraphs)
     
     frequency.daily <- "365"
@@ -54,8 +55,9 @@ shinyServer(
       if(!is.object(result)){
         result  <-  tryCatch({
           Workbook <- loadWorkbook(inFile$datapath)
+          #           Workbook <- read.xls(inFile$datapath)
         }, error = function(e) {
-          "error"
+          paste("error",e)
         })
         
       }
@@ -94,23 +96,32 @@ shinyServer(
       if (!is.null(variables())) {
         updateTabsetPanel(session, "TABSETPANEL1", selected = "Select Variables")
       } 
-      updateSliderInput(session, "alphaSlider",
-                        value = input$alphaText)
-      updateSliderInput(session, "betaSlider",
-                        value = input$betaText)
-      updateSliderInput(session, "gammaSlider",
-                        value = input$gammaText)
+      #       updateSliderInput(session, "alphaSlider",
+      #                         value = input$alphaText)
+      #       updateSliderInput(session, "betaSlider",
+      #                         value = input$betaText)
+      #       updateSliderInput(session, "gammaSlider",
+      #                         value = input$gammaText)
       
     })
     
+    observeEvent(input$alphaText, 
+                 updateNumericInput(session, "alphaSlider", value = input$alphaText)
+    )
+    observeEvent(input$betaText, 
+                 updateNumericInput(session, "betaSlider", value = input$betaText)
+    )
+    observeEvent(input$gammaText, 
+                 updateNumericInput(session, "gammaSlider", value = input$gammaText)
+    )
     observeEvent(input$alphaSlider, 
-      updateNumericInput(session, "alphaText", value = input$alphaSlider)
+                 updateNumericInput(session, "alphaText", value = input$alphaSlider)
     )
     observeEvent(input$betaSlider, 
-      updateNumericInput(session, "betaText", value = input$betaSlider)
+                 updateNumericInput(session, "betaText", value = input$betaSlider)
     )
     observeEvent(input$gammaSlider, 
-      updateNumericInput(session, "gammaText", value = input$gammaSlider)
+                 updateNumericInput(session, "gammaText", value = input$gammaSlider)
     )
     
     table <- reactive({
@@ -119,6 +130,8 @@ shinyServer(
       }else{
         if(!is.null(workbook()) && is.null(sheets()))
           return(workbook())
+        #         w <- readWorksheet(workbook(), sheet=input$Sheet)
+        #         return(w[order(w$High),])
         return(readWorksheet(workbook(), sheet=input$Sheet))
       }
       #       return(readWorksheet(workbook(), sheet=input$Sheet))
@@ -148,7 +161,20 @@ shinyServer(
       selectInput("DateVariable", "Select Date variable", as.list(c("",unique(variables()))),selected = "") 
     })
     
+    suggestedYear <- reactive({
+      if (!is.null(input$DateVariable) && input$DateVariable!= "")
+        getYear(min(table()$Date))
+      #       exec <- paste("getYear(min(table()$",input$DateVariable,"))",sep="")
+      #       eval(parse(text=exec))
+      
+    })
     
+    
+    observeEvent(input$startYear, 
+                 if(input$startYear == ""){
+                   updateNumericInput(session, "startYear", value = suggestedYear())
+                 }
+    )
     
     output$variableSelector <- renderUI({
       
@@ -165,6 +191,7 @@ shinyServer(
           eval(parse(text=exec))
           
           freq <- get(paste("frequency.",input$period,sep=""))
+          #############I NEED START DATE###############
           exec <- paste("dfts.",input$period,".",input$variable," <- ts(df.",input$period,".",input$variable,",frequency = ",freq,",start=c(2005,1))",sep="")
           eval(parse(text=exec))
           
@@ -207,7 +234,8 @@ shinyServer(
       wintersModel <- reactive({
         if(!is.null(dataProcessed())){
           #winters
-          exec <- paste("dfts.",input$period,".",input$variable,".withtrend.withseasonal <- HoltWinters(dataProcessed(), alpha=",alphavalue(),",beta=",betavalue(),", gamma=",gammavalue(),")",sep="")
+          #           exec <- paste("dfts.",input$period,".",input$variable,".withtrend.withseasonal <- HoltWinters(dataProcessed(), alpha=",alphavalue(),",beta=",betavalue(),", gamma=",gammavalue(),")",sep="")
+          exec <- paste("HoltWinters(dataProcessed(), alpha=",alphavalue(),",beta=",betavalue(),", gamma=",gammavalue(),",seasonal=\"",input$seasonalMode,"\")",sep="")
           eval(parse(text=exec))
         }else {
           return(NULL)
@@ -256,5 +284,107 @@ output$accuracy <- renderTable({
     return(NULL)
   }
 }) #ACCURACY TABLE
+
+optimalValue <- reactive({
+# if(!is.null(dataProcessed()) && strtrim(input$numberIterationsOptimize)!=""){
+if(!is.null(dataProcessed()) && input$numberIterationsOptimize!=""){
+  optimizationFunction<- function(x) {   ## Optimization function for ALPHA, BETA and GAMMA for a specific accuracy value.
+    winterSolution <- HoltWinters(dataProcessed(), alpha=x[1], beta=x[2], gamma=x[3],seasonal = input$seasonalMode)#,seasonal = "additive")
+    #accuracy(dataProcessed(),winterSolution$fitted)[3]#[input$measurement2Optimize]
+    index <- as.integer(input$measurement2Optimize)
+    if (index<=6){
+      accuracy(dataProcessed(),winterSolution$fitted)[as.integer(input$measurement2Optimize)]
+    }else if (index==8) {
+      RESIDUALS <- dataProcessed()-winterSolution$fitted[,1]
+      BIAS <- sum(RESIDUALS)
+      MAD <- mean(abs(RESIDUALS))
+      abs(BIAS/MAD)#MINIMIZE THE ABS VALUE OF THE TR 
+    }else {
+      RESIDUALS <- dataProcessed()-winterSolution$fitted[,1]
+      abs(sum(RESIDUALS))#MINIMIZE THE ABS VALUE OF THE BIAS-> CLOSER TO 0 BETTER
+    }
+  }
+  
+  optimal <-Inf 
+  optimal_alpha <-Inf 
+  optimal_beta <-Inf 
+  optimal_gamma <-Inf 
+  TOP <- as.integer(input$numberIterationsOptimize)
+  for(i in 1:TOP){
+    alpha <- runif(1, 0, 1)
+    beta <- runif(1, 0, 1)
+    gamma <- runif(1, 0, 1)
+    optimalLocal <- suppressWarnings(optim(c(alpha,beta,gamma), optimizationFunction,lower = c(0.0000001,0,0), upper = c(1,1,1)))
+    
+    #       optimalLocal <- optim(c(alpha,beta,gamma), optimizationFunction,lower = c(0.0000001,0,0), upper = c(1,1,1))
+    if(optimalLocal$value<optimal){
+      optimal_alpha <-optimalLocal$par[1]
+      optimal_beta <-optimalLocal$par[2] 
+      optimal_gamma <-optimalLocal$par[3]
+      optimal <- optimalLocal$value
+    }
+  }
+  cbind(optimal_alpha,optimal_beta,optimal_gamma,optimal)
+}else {
+  return(NULL)
+}
+ })#optimalValue
+
+output$optimalValuesTable <- renderTable({
+    if(!is.null(optimalValue())){
+       colnames(optimalValue()) <- c("optimal alpha","optimal beta","optimal gamma","optimal") 
+      optimalValue()
+    }else {
+      return(NULL)
+    }
+}) #OPTIMAL TABLE
+
+wintersOptimalModel <- reactive({
+  if(!is.null(optimalValue())){
+    HoltWinters(dataProcessed(), alpha=optimalValue()[1], beta=optimalValue()[2], gamma=optimalValue()[3],seasonal = input$seasonalMode)
+  }else {
+    return(NULL)
+  }
+})
+
+output$accuracyOptimal <- renderTable({
+  if(!is.null(optimalValue()) && !is.null(dataProcessed())){
+    winterSolution <- HoltWinters(dataProcessed(), alpha=optimalValue()[1], beta=optimalValue()[2], gamma=optimalValue()[3],seasonal = input$seasonalMode)
+    RESIDUALS <- dataProcessed()-wintersOptimalModel()$fitted[,1]
+    BIAS <- sum(RESIDUALS)
+    TABLE <- accuracy(dataProcessed(),wintersOptimalModel()$fitted)
+    MAD <- mean(abs(RESIDUALS))
+    TR <- BIAS/TABLE[1,3]
+    cbind(TABLE,BIAS,TR)
+  }else {
+    return(NULL)
+  }
+}) #ACCURACY OPTIMAL TABLE
+
+output$wintersPlotOptimal <- renderPlot({
+  if(!is.null(optimalValue())){
+    #winters
+    plot(wintersOptimalModel())
+  }else {
+    return(NULL)
+  }
+})
+
+wintersPredictionOptimal <- reactive({
+  if(!is.null(wintersOptimalModel())){
+    exec <- paste("predict(wintersOptimalModel(),n.ahead=",input$predictionPeriodTextOptimal,",level=0.95)",sep="")
+    eval(parse(text=exec))   
+  }else {
+    return(NULL)
+  }
+})
+
+output$wintersPredictionPlotOptimal <- renderPlot({
+  if(!is.null(wintersPredictionOptimal())){
+    plot(wintersOptimalModel(), wintersPredictionOptimal())
+  }else {
+    return(NULL)
+  }
+})
 
   })
